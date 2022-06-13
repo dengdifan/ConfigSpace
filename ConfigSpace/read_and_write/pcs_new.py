@@ -1,5 +1,24 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+"""
+PCS (parameter configuration space) is a simple, human-readable file format for the
+description of an algorithm's configurable parameters, their possible values, as well
+as any parameter dependencies. There exist an old and a new version.
+
+The new PCS format is part of the
+`Algorithm Configuration Library 2.0 <https://bitbucket.org/mlindauer/aclib2/src/master/>`_.
+A detailed description of the **new** format can be found in the
+`ACLIB 2.0 docs <https://bitbucket.org/mlindauer/aclib2/src/aclib2/AClib_Format.md>`_, in the
+`SMACv2 docs <https://www.cs.ubc.ca/labs/beta/Projects/SMAC/v2.10.03/manual.pdf>`_
+and further examples are provided in the
+`pysmac docs <https://pysmac.readthedocs.io/en/latest/pcs.html>`_
+
+.. note::
+
+    The PCS format definition has changed in the year 2016 and is supported by
+    AClib 2.0, as well as SMAC (v2 and v3). To write or to read the **old** version of pcs,
+    please use the :class:`~ConfigSpace.read_and_write.pcs` module.
+"""
 
 __authors__ = ["Katharina Eggensperger", "Matthias Feurer", "Christina Hernández Wunsch"]
 __contact__ = "automl.org"
@@ -39,6 +58,7 @@ from ConfigSpace.forbidden import (
     ForbiddenInClause,
     AbstractForbiddenComponent,
     MultipleValueForbiddenClause,
+    ForbiddenRelation,
 )
 
 # Build pyparsing expressions for params
@@ -89,9 +109,9 @@ pp_forbidden_clause = "{" + pp_param_name + "=" + pp_numberorname + \
 
 
 def build_categorical(param):
-    if param.probabilities is not None:
+    if param.weights is not None:
         raise ValueError('The pcs format does not support categorical hyperparameters with '
-                         'assigend weights/probabilities (for hyperparameter %s)' % param.name)
+                         'assigned weights (for hyperparameter %s)' % param.name)
     cat_template = "%s categorical {%s} [%s]"
     return cat_template % (param.name,
                            ", ".join([str(value) for value in param.choices]),
@@ -150,28 +170,33 @@ def build_condition(condition):
     notequal_template = "%s | %s != %s"
     equal_template = "%s | %s == %s"
 
+    if isinstance(condition, InCondition):
+        cond_values = [str(value) for value in condition.value]
+    else:
+        cond_values = str(condition.value)
+
     if isinstance(condition, NotEqualsCondition):
         return notequal_template % (condition.child.name,
                                     condition.parent.name,
-                                    condition.value)
+                                    cond_values)
 
     elif isinstance(condition, InCondition):
         return in_template % (condition.child.name,
                               condition.parent.name,
-                              ", ".join(condition.values))
+                              ", ".join(cond_values))
 
     elif isinstance(condition, EqualsCondition):
         return equal_template % (condition.child.name,
                                  condition.parent.name,
-                                 condition.value)
+                                 cond_values)
     elif isinstance(condition, LessThanCondition):
         return less_template % (condition.child.name,
                                 condition.parent.name,
-                                condition.value)
+                                cond_values)
     elif isinstance(condition, GreaterThanCondition):
         return greater_template % (condition.child.name,
                                    condition.parent.name,
-                                   condition.value)
+                                   cond_values)
 
 
 def build_conjunction(conjunction):
@@ -197,6 +222,10 @@ def build_forbidden(clause):
         raise TypeError("build_forbidden must be called with an instance of "
                         "'%s', got '%s'" %
                         (AbstractForbiddenComponent, type(clause)))
+    if isinstance(clause, ForbiddenRelation):
+        raise TypeError("build_forbidden must not be called with an instance of "
+                        "'%s', got '%s'" %
+                        (ForbiddenRelation, type(clause)))
 
     retval = StringIO()
     retval.write("{")

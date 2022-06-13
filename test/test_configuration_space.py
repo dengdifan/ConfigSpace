@@ -34,14 +34,19 @@ import unittest
 
 import numpy as np
 
-from ConfigSpace import ConfigurationSpace, \
-    Configuration, CategoricalHyperparameter, UniformIntegerHyperparameter, \
-    Constant, EqualsCondition, NotEqualsCondition, InCondition, \
-    AndConjunction, OrConjunction, ForbiddenEqualsClause, \
-    ForbiddenAndConjunction, UniformFloatHyperparameter
-from ConfigSpace.hyperparameters import NormalFloatHyperparameter, \
-    NormalIntegerHyperparameter, OrdinalHyperparameter
+from ConfigSpace import (ConfigurationSpace,
+                         Configuration, CategoricalHyperparameter, UniformIntegerHyperparameter,
+                         Constant, EqualsCondition, NotEqualsCondition, InCondition,
+                         AndConjunction, OrConjunction, ForbiddenEqualsClause,
+                         ForbiddenAndConjunction)
+from ConfigSpace.hyperparameters import (UniformFloatHyperparameter,
+                                         NormalFloatHyperparameter,
+                                         BetaFloatHyperparameter,
+                                         NormalIntegerHyperparameter,
+                                         BetaIntegerHyperparameter,
+                                         OrdinalHyperparameter)
 from ConfigSpace.exceptions import ForbiddenValueError
+from ConfigSpace.forbidden import ForbiddenEqualsRelation
 
 
 def byteify(input):
@@ -213,6 +218,30 @@ class TestConfigurationSpace(unittest.TestCase):
                                   "Default: 0\n"
                                   "  Forbidden Clauses:\n"
                                   "    Forbidden: input1 == 1\n")
+
+    def test_add_forbidden_relation(self):
+        cs = ConfigurationSpace()
+        hp1 = CategoricalHyperparameter("input1", [0, 1])
+        hp2 = CategoricalHyperparameter("input2", [1, 0])
+        cs.add_hyperparameters([hp1, hp2])
+        forb = ForbiddenEqualsRelation(hp1, hp2)
+        # TODO add checking whether a forbidden clause makes sense at all
+        cs.add_forbidden_clause(forb)
+        # TODO add something to properly retrieve the forbidden clauses
+        self.assertEqual(str(cs), "Configuration space object:\n  "
+                                  "Hyperparameters:\n"
+                                  "    input1, Type: Categorical, Choices: {0, 1}, Default: 0\n"
+                                  "    input2, Type: Categorical, Choices: {1, 0}, Default: 1\n"
+                                  "  Forbidden Clauses:\n"
+                                  "    Forbidden: input1 == input2\n")
+
+    def test_add_forbidden_relation_categorical(self):
+        cs = ConfigurationSpace()
+        hp1 = CategoricalHyperparameter("input1", ['a', 'b'], default_value='b')
+        hp2 = CategoricalHyperparameter("input2", ['b', 'c'], default_value='b')
+        cs.add_hyperparameters([hp1, hp2])
+        forb = ForbiddenEqualsRelation(hp1, hp2)
+        self.assertRaises(ForbiddenValueError, cs.add_forbidden_clause, forb)
 
     def test_add_forbidden_illegal(self):
         cs = ConfigurationSpace()
@@ -704,8 +733,8 @@ class TestConfigurationSpace(unittest.TestCase):
                 InCondition(hyper_params["hp7"], hyper_params["hp5"], ['1'])))
 
         for cfg, fixture in zip(
-                cs.sample_configuration(10),
-                [[1, np.NaN, 2], [0, 2, np.NaN], [0, 1, 1], [1, np.NaN, 2], [1, np.NaN, 2]]
+            cs.sample_configuration(10),
+            [[1, np.NaN, 2], [2, np.NaN, np.NaN], [0, 0, np.NaN], [0, 2, np.NaN], [0, 0, np.NaN]]
         ):
             np.testing.assert_array_almost_equal(cfg.get_array(), fixture)
 
@@ -764,7 +793,8 @@ class TestConfigurationSpace(unittest.TestCase):
         self.assertEqual((0.25, 0.75), cs.get_hyperparameter("switch").probabilities)
         self.assertEqual((0.3, 0.7),
                          cs.get_hyperparameter("algo1_subspace:algo1_param1").probabilities)
-        self.assertEqual(None, cs.get_hyperparameter("algo2_subspace:algo2_param1").probabilities)
+        self.assertTupleEqual((0.5, 0.5), cs.get_hyperparameter(
+            "algo2_subspace:algo2_param1").probabilities)
 
         # check default values in the final configuration space
         self.assertEqual("algo1", cs.get_hyperparameter("switch").default_value)
@@ -802,6 +832,123 @@ class TestConfigurationSpace(unittest.TestCase):
         assert list(d.values()) == hyperparameters
         assert list(d.items()) == list(zip(names, hyperparameters))
         assert len(d) == 5
+
+    def test_remove_hyperparameter_priors(self):
+        cs = ConfigurationSpace()
+        integer = UniformIntegerHyperparameter('integer', 1, 5, log=True)
+        cat = CategoricalHyperparameter('cat', [0, 1, 2], weights=[1, 2, 3])
+        beta = BetaFloatHyperparameter("beta", alpha=8, beta=2, lower=-1, upper=11)
+        norm = NormalIntegerHyperparameter("norm", mu=5, sigma=4, lower=1, upper=15)
+        cs.add_hyperparameters([integer, cat, beta, norm])
+        cat_default = cat.default_value
+        norm_default = norm.default_value
+        beta_default = beta.default_value
+
+        # add some conditions, to test that remove_parameter_priors keeps the forbiddens
+        cond_1 = EqualsCondition(norm, cat, 2)
+        cond_2 = OrConjunction(EqualsCondition(beta, cat, 0),
+                               EqualsCondition(beta, cat, 1))
+        cond_3 = OrConjunction(EqualsCondition(norm, integer, 1),
+                               EqualsCondition(norm, integer, 3),
+                               EqualsCondition(norm, integer, 5))
+        cs.add_conditions([cond_1, cond_2, cond_3])
+
+        # add some forbidden clauses too, to test that remove_parameter_priors keeps the forbiddens
+        forbidden_clause_a = ForbiddenEqualsClause(cat, 0)
+        forbidden_clause_c = ForbiddenEqualsClause(integer, 3)
+        forbidden_clause_d = ForbiddenAndConjunction(forbidden_clause_a, forbidden_clause_c)
+        cs.add_forbidden_clauses([forbidden_clause_c, forbidden_clause_d])
+        uniform_cs = cs.remove_hyperparameter_priors()
+
+        expected_cs = ConfigurationSpace()
+        unif_integer = UniformIntegerHyperparameter('integer', 1, 5, log=True)
+        unif_cat = CategoricalHyperparameter('cat', [0, 1, 2], default_value=cat_default)
+
+        unif_beta = UniformFloatHyperparameter(
+            "beta", lower=-1, upper=11, default_value=beta_default)
+        unif_norm = UniformIntegerHyperparameter(
+            "norm", lower=1, upper=15, default_value=norm_default)
+        expected_cs.add_hyperparameters([unif_integer, unif_cat, unif_beta, unif_norm])
+
+        # add some conditions, to test that remove_parameter_priors keeps the forbiddens
+        cond_1 = EqualsCondition(unif_norm, unif_cat, 2)
+        cond_2 = OrConjunction(EqualsCondition(unif_beta, unif_cat, 0),
+                               EqualsCondition(unif_beta, unif_cat, 1))
+        cond_3 = OrConjunction(EqualsCondition(unif_norm, unif_integer, 1),
+                               EqualsCondition(unif_norm, unif_integer, 3),
+                               EqualsCondition(unif_norm, unif_integer, 5))
+        expected_cs.add_conditions([cond_1, cond_2, cond_3])
+
+        # add some forbidden clauses too, to test that remove_parameter_priors keeps the forbiddens
+        forbidden_clause_a = ForbiddenEqualsClause(unif_cat, 0)
+        forbidden_clause_c = ForbiddenEqualsClause(unif_integer, 3)
+        forbidden_clause_d = ForbiddenAndConjunction(forbidden_clause_a, forbidden_clause_c)
+        expected_cs.add_forbidden_clauses([forbidden_clause_c, forbidden_clause_d])
+
+        # __eq__ not implemented, so this is the next best thing
+        self.assertEqual(repr(uniform_cs), repr(expected_cs))
+
+    def test_substitute_hyperparameters_in_conditions(self):
+        cs1 = ConfigurationSpace()
+        orig_hp1 = CategoricalHyperparameter("input1", [0, 1])
+        orig_hp2 = CategoricalHyperparameter("input2", [0, 1])
+        orig_hp3 = UniformIntegerHyperparameter("child1", 0, 10)
+        orig_hp4 = UniformIntegerHyperparameter("child2", 0, 10)
+        cs1.add_hyperparameters([orig_hp1, orig_hp2, orig_hp3, orig_hp4])
+        cond1 = EqualsCondition(orig_hp2, orig_hp3, 0)
+        cond2 = EqualsCondition(orig_hp1, orig_hp3, 5)
+        cond3 = EqualsCondition(orig_hp1, orig_hp4, 1)
+        andCond = AndConjunction(cond2, cond3)
+        cs1.add_conditions([cond1, andCond])
+
+        cs2 = ConfigurationSpace()
+        sub_hp1 = CategoricalHyperparameter("input1", [0, 1, 2])
+        sub_hp2 = CategoricalHyperparameter("input2", [0, 1, 3])
+        sub_hp3 = NormalIntegerHyperparameter("child1", lower=0, upper=10, mu=5, sigma=2)
+        sub_hp4 = BetaIntegerHyperparameter("child2", lower=0, upper=10, alpha=3, beta=5)
+        cs2.add_hyperparameters([sub_hp1, sub_hp2, sub_hp3, sub_hp4])
+        new_conditions = cs1.substitute_hyperparameters_in_conditions(cs1.get_conditions(), cs2)
+
+        test_cond1 = EqualsCondition(sub_hp2, sub_hp3, 0)
+        test_cond2 = EqualsCondition(sub_hp1, sub_hp3, 5)
+        test_cond3 = EqualsCondition(sub_hp1, sub_hp4, 1)
+        test_andCond = AndConjunction(test_cond2, test_cond3)
+        cs2.add_conditions([test_cond1, test_andCond])
+        test_conditions = cs2.get_conditions()
+
+        self.assertEqual(new_conditions[0], test_conditions[0])
+        self.assertEqual(new_conditions[1], test_conditions[1])
+
+    def test_substitute_hyperparameters_in_forbiddens(self):
+        cs1 = ConfigurationSpace()
+        orig_hp1 = CategoricalHyperparameter("input1", [0, 1])
+        orig_hp2 = CategoricalHyperparameter("input2", [0, 1])
+        orig_hp3 = UniformIntegerHyperparameter("input3", 0, 10)
+        orig_hp4 = UniformIntegerHyperparameter("input4", 0, 10)
+        cs1.add_hyperparameters([orig_hp1, orig_hp2, orig_hp3, orig_hp4])
+        forb_1 = ForbiddenEqualsClause(orig_hp1, 0)
+        forb_2 = ForbiddenEqualsClause(orig_hp2, 1)
+        forb_3 = ForbiddenEqualsClause(orig_hp3, 10)
+        forb_4 = ForbiddenAndConjunction(forb_1, forb_2)
+        cs1.add_forbidden_clauses([forb_3, forb_4])
+
+        cs2 = ConfigurationSpace()
+        sub_hp1 = CategoricalHyperparameter("input1", [0, 1, 2])
+        sub_hp2 = CategoricalHyperparameter("input2", [0, 1, 3])
+        sub_hp3 = NormalIntegerHyperparameter("input3", lower=0, upper=10, mu=5, sigma=2)
+        sub_hp4 = BetaIntegerHyperparameter("input4", lower=0, upper=10, alpha=3, beta=5)
+        cs2.add_hyperparameters([sub_hp1, sub_hp2, sub_hp3, sub_hp4])
+        new_forbiddens = cs1.substitute_hyperparameters_in_forbiddens(cs1.get_forbiddens(), cs2)
+
+        test_forb_1 = ForbiddenEqualsClause(sub_hp1, 0)
+        test_forb_2 = ForbiddenEqualsClause(sub_hp2, 1)
+        test_forb_3 = ForbiddenEqualsClause(sub_hp3, 10)
+        test_forb_4 = ForbiddenAndConjunction(test_forb_1, test_forb_2)
+        cs2.add_forbidden_clauses([test_forb_3, test_forb_4])
+        test_forbiddens = cs2.get_forbiddens()
+
+        self.assertEqual(new_forbiddens[1], test_forbiddens[1])
+        self.assertEqual(new_forbiddens[0], test_forbiddens[0])
 
     def test_estimate_size(self):
         cs = ConfigurationSpace()

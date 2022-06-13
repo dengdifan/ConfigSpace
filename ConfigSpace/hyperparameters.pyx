@@ -35,7 +35,7 @@ from collections import OrderedDict, Counter
 from typing import List, Any, Dict, Union, Set, Tuple, Optional
 
 import numpy as np
-from scipy.stats import truncnorm
+from scipy.stats import truncnorm, beta as spbeta, norm
 cimport numpy as np
 
 
@@ -151,6 +151,49 @@ cdef class Hyperparameter(object):
     cpdef int compare_vector(self, DTYPE_t value, DTYPE_t value2):
         raise NotImplementedError()
 
+    def pdf(self, vector: np.ndarray) -> np.ndarray:
+        """
+        Computes the probability density function of the hyperparameter in 
+        the hyperparameter space (the one specified by the user).
+        For each hyperparameter type, there is also a method _pdf which 
+        operates on the transformed (and possibly normalized) hyperparameter
+        space. Only legal values return a positive probability density,
+        otherwise zero.
+        
+        Parameters
+        ----------
+        vector: np.ndarray
+            the (N, ) vector of inputs for which the probability density
+            function is to be computed.
+        
+        Returns
+        ----------
+        np.ndarray(N, )
+            Probability density values of the input vector
+        """
+        raise NotImplementedError()
+        
+    def _pdf(self, vector: np.ndarray) -> np.ndarray:
+        """
+        Computes the probability density function of the hyperparameter in 
+        the transformed (and possibly normalized, depends on the parameter 
+        type) space. As such, one never has to worry about log-normal 
+        distributions, only normal distributions (as the inverse_transform
+         in the pdf method handles these).
+        
+        Parameters
+        ----------
+        vector: np.ndarray
+            the (N, ) vector of inputs for which the probability density
+            function is to be computed.
+        
+        Returns
+        ----------
+        np.ndarray(N, )
+            Probability density values of the input vector
+        """
+        raise NotImplementedError()
+
     def get_size(self) -> float:
         raise NotImplementedError()
 
@@ -213,7 +256,11 @@ cdef class Constant(Hyperparameter):
         if not isinstance(other, self.__class__):
             return False
 
-        return self.value == other.value and self.name == other.name
+        return (
+            self.value == other.value and
+            self.name == other.name and
+            self.default_value == other.default_value
+        )
 
     def __copy__(self):
         return Constant(self.name, self.value, meta=self.meta)
@@ -257,6 +304,54 @@ cdef class Constant(Hyperparameter):
     def get_neighbors(self, value: Any, rs: np.random.RandomState, number: int,
                       transform: bool = False) -> List:
         return []
+
+    def pdf(self, vector: np.ndarray) -> np.ndarray:
+        """
+        Computes the probability density function of the parameter in 
+        the original parameter space (the one specified by the user).
+        For each hyperparameter type, there is also a method _pdf which 
+        operates on the transformed (and possibly normalized) parameter
+        space. Only legal values return a positive probability density,
+        otherwise zero.
+        
+        Parameters
+        ----------
+        vector: np.ndarray
+            the (N, ) vector of inputs for which the probability density
+            function is to be computed.
+                    
+        Returns
+        ----------
+        np.ndarray(N, )
+            Probability density values of the input vector
+        """
+        if vector.ndim != 1:
+            raise ValueError("Method pdf expects a one-dimensional numpy array")
+        return self._pdf(vector)
+
+    def _pdf(self, vector: np.ndarray) -> np.ndarray:
+        """
+        Computes the probability density function of the parameter in 
+        the transformed (and possibly normalized, depends on the parameter 
+        type) space. As such, one never has to worry about log-normal 
+        distributions, only normal distributions (as the inverse_transform
+        in the pdf method handles these).
+        
+        Parameters
+        ----------
+        vector: np.ndarray
+            the (N, ) vector of inputs for which the probability density
+            function is to be computed.
+        
+        Returns
+        ----------
+        np.ndarray(N, )
+            Probability density values of the input vector
+        """
+        return (vector == self.value).astype(float)
+
+    def get_max_density(self):
+        return 1.0
 
     def get_size(self) -> float:
         return 1.0
@@ -374,6 +469,60 @@ cdef class FloatHyperparameter(NumericalHyperparameter):
     cpdef np.ndarray _transform_vector(self, np.ndarray vector):
         raise NotImplementedError()
 
+    def pdf(self, vector: np.ndarray) -> np.ndarray:
+        """
+        Computes the probability density function of the parameter in 
+        the original parameter space (the one specified by the user).
+        For each parameter type, there is also a method _pdf which 
+        operates on the transformed (and possibly normalized) parameter
+        space. Only legal values return a positive probability density,
+        otherwise zero.
+        
+        Parameters
+        ----------
+        vector: np.ndarray
+            the (N, ) vector of inputs for which the probability density
+            function is to be computed.
+                    
+        Returns
+        ----------
+        np.ndarray(N, )
+            Probability density values of the input vector
+        """
+        if vector.ndim != 1:
+            raise ValueError("Method pdf expects a one-dimensional numpy array")
+        vector = self._inverse_transform(vector)
+        return self._pdf(vector)
+        
+    def _pdf(self, vector: np.ndarray) -> np.ndarray:
+        """
+        Computes the probability density function of the parameter in 
+        the transformed (and possibly normalized, depends on the parameter 
+        type) space. As such, one never has to worry about log-normal 
+        distributions, only normal distributions (as the inverse_transform
+        in the pdf method handles these).
+        
+        Parameters
+        ----------
+        vector: np.ndarray
+            the (N, ) vector of inputs for which the probability density
+            function is to be computed.
+        
+        Returns
+        ----------
+        np.ndarray(N, )
+            Probability density values of the input vector
+        """
+        raise NotImplementedError()
+
+    def get_max_density(self) -> float:
+        """
+        Returns the maximal density on the pdf for the parameter (so not 
+        the mode, but the value of the pdf on the mode).
+        """
+        raise NotImplementedError()
+
+
 
 cdef class IntegerHyperparameter(NumericalHyperparameter):
     def __init__(self, name: str, default_value: int, meta: Optional[Dict] = None) -> None:
@@ -387,7 +536,7 @@ cdef class IntegerHyperparameter(NumericalHyperparameter):
 
     def check_default(self, default_value) -> int:
         raise NotImplemented
-
+    
     def check_int(self, parameter: int, name: str) -> int:
         if abs(int(parameter) - parameter) > 0.00000001 and \
                         type(parameter) is not int:
@@ -410,6 +559,62 @@ cdef class IntegerHyperparameter(NumericalHyperparameter):
 
     cpdef np.ndarray _transform_vector(self, np.ndarray vector):
         raise NotImplementedError()
+    
+    def pdf(self, vector: np.ndarray) -> np.ndarray:
+        """
+        Computes the probability density function of the hyperparameter in 
+        the hyperparameter space (the one specified by the user).
+        For each hyperparameter type, there is also a method _pdf which 
+        operates on the transformed (and possibly normalized) hyperparameter
+        space. Only legal values return a positive probability density,
+        otherwise zero.
+        
+        Parameters
+        ----------
+        vector: np.ndarray
+            the (N, ) vector of inputs for which the probability density
+            function is to be computed.
+                    
+        Returns
+        ----------
+        np.ndarray(N, )
+            Probability density values of the input vector
+        """
+        if vector.ndim != 1:
+            raise ValueError("Method pdf expects a one-dimensional numpy array")
+        is_integer = (np.round(vector) == vector).astype(int)
+        vector = self._inverse_transform(vector)
+        return self._pdf(vector) * is_integer
+        
+    def _pdf(self, vector: np.ndarray) -> np.ndarray:
+        """
+        Computes the probability density function of the parameter in 
+        the transformed (and possibly normalized, depends on the parameter 
+        type) space. As such, one never has to worry about log-normal 
+        distributions, only normal distributions (as the inverse_transform
+        in the pdf method handles these). Optimally, an IntegerHyperparameter
+        should have a corresponding float, which can be utlized for the calls
+        to the probability density function (see e.g. NormalIntegerHyperparameter)
+        
+        Parameters
+        ----------
+        vector: np.ndarray
+            the (N, ) vector of inputs for which the probability density
+            function is to be computed.
+        
+        Returns
+        ----------
+        np.ndarray(N, )
+            Probability density values of the input vector
+        """
+        raise NotImplementedError()
+        
+    def get_max_density(self) -> float:
+        """
+        Returns the maximal density on the pdf for the parameter (so not 
+        the mode, but the value of the pdf on the mode).
+        """
+        raise NotImplementedError()
 
 
 cdef class UniformFloatHyperparameter(FloatHyperparameter):
@@ -418,7 +623,7 @@ cdef class UniformFloatHyperparameter(FloatHyperparameter):
                  q: Union[int, float, None] = None, log: bool = False,
                  meta: Optional[Dict] = None) -> None:
         """
-        A float hyperparameter.
+        A uniformly distributed float hyperparameter.
 
         Its values are sampled from a uniform distribution with values
         from ``lower`` to ``upper``.
@@ -543,10 +748,10 @@ cdef class UniformFloatHyperparameter(FloatHyperparameter):
         # or inside class itself
         return UniformIntegerHyperparameter(
             name=self.name,
-            lower=int(self.lower),
-            upper=int(self.upper),
-            default_value=int(np.round(self.default_value)),
-            q=int(self.q),
+            lower=int(np.ceil(self.lower)),
+            upper=int(np.floor(self.upper)),
+            default_value=int(np.rint(self.default_value)),
+            q=int(np.rint(self.q)),
             log=self.log,
         )
 
@@ -608,12 +813,41 @@ cdef class UniformFloatHyperparameter(FloatHyperparameter):
                 neighbors.append(neighbor)
         return neighbors
 
+    def _pdf(self, vector: np.ndarray) -> np.ndarray:
+        """
+        Computes the probability density function of the parameter in 
+        the transformed (and possibly normalized, depends on the parameter 
+        type) space. As such, one never has to worry about log-normal 
+        distributions, only normal distributions (as the inverse_transform
+        in the pdf method handles these).
+        
+        Parameters
+        ----------
+        vector: np.ndarray
+            the (N, ) vector of inputs for which the probability density
+            function is to be computed.
+        
+        Returns
+        ----------
+        np.ndarray(N, )
+            Probability density values of the input vector
+        """
+        # everything that comes into _pdf for a uniform variable should
+        # already be in [0, 1]-range, and if not, it's outside the upper
+        # or lower bound.
+        ub = 1
+        lb = 0
+        inside_range = ((lb <= vector) & (vector <= ub)).astype(int)
+        return inside_range / (self.upper - self.lower)
+
+    def get_max_density(self) -> float:
+        return 1 / (self.upper - self.lower)
+        
     def get_size(self) -> float:
         if self.q is None:
             return np.inf
         else:
             return np.rint((self.upper - self.lower) / self.q) + 1
-
 
 cdef class NormalFloatHyperparameter(FloatHyperparameter):
     cdef public mu
@@ -626,7 +860,7 @@ cdef class NormalFloatHyperparameter(FloatHyperparameter):
                  upper: Optional[Union[float, int]] = None,
                  meta: Optional[Dict] = None) -> None:
         r"""
-        A float hyperparameter.
+        A normally distributed float hyperparameter.
 
         Its values are sampled from a normal distribution
         :math:`\mathcal{N}(\mu, \sigma^2)`.
@@ -786,13 +1020,15 @@ cdef class NormalFloatHyperparameter(FloatHyperparameter):
         return UniformFloatHyperparameter(self.name,
                                           lb,
                                           ub,
-                                          default_value=int(
-                                              np.round(self.default_value, 0)),
-                                          q=self.q, log=self.log)
+                                          default_value=self.default_value,
+                                          q=self.q, log=self.log, meta=self.meta)
 
     def check_default(self, default_value: Union[int, float]) -> Union[int, float]:
         if default_value is None:
-            return self.mu
+            if self.log:
+                return self._transform_scalar(self.mu)
+            else:
+                return self.mu
 
         elif self.is_legal(default_value):
             return default_value
@@ -803,9 +1039,17 @@ cdef class NormalFloatHyperparameter(FloatHyperparameter):
         if self.q is None:
             q_int = None
         else:
-            q_int = int(self.q)
-        return NormalIntegerHyperparameter(self.name, int(self.mu), self.sigma,
-                                           default_value=int(np.round(self.default_value, 0)),
+            q_int = int(np.rint(self.q))
+        if self.lower is None:
+            lower = None
+            upper = None
+        else:
+            lower=np.ceil(self.lower)
+            upper=np.floor(self.upper)
+                                           
+        return NormalIntegerHyperparameter(self.name, int(np.rint(self.mu)), self.sigma,
+                                           lower=lower, upper=upper,
+                                           default_value=int(np.rint(self.default_value)),
                                            q=q_int, log=self.log)
 
     def is_legal(self, value: Union[float]) -> bool:
@@ -824,10 +1068,11 @@ cdef class NormalFloatHyperparameter(FloatHyperparameter):
         else:
             mu = self.mu
             sigma = self.sigma
-            lower = self.lower
-            upper = self.upper
-            a = (self.lower - mu) / sigma
+            lower = self._lower
+            upper = self._upper
+            a = (lower - mu) / sigma
             b = (upper - mu) / sigma
+
             return truncnorm.rvs(a, b, loc=mu, scale=sigma, size=size, random_state=rs)
 
     cpdef np.ndarray _transform_vector(self, np.ndarray vector):
@@ -876,13 +1121,286 @@ cdef class NormalFloatHyperparameter(FloatHyperparameter):
         else:
             return np.rint((self.upper - self.lower) / self.q) + 1
 
+    def _pdf(self, vector: np.ndarray) -> np.ndarray:
+        """
+        Computes the probability density function of the parameter in 
+        the transformed (and possibly normalized, depends on the parameter 
+        type) space. As such, one never has to worry about log-normal 
+        distributions, only normal distributions (as the inverse_transform
+        in the pdf method handles these).
+        
+        Parameters
+        ----------
+        vector: np.ndarray
+            the (N, ) vector of inputs for which the probability density
+            function is to be computed.
+        
+        Returns
+        ----------
+        np.ndarray(N, )
+            Probability density values of the input vector
+        """        
+        mu = self.mu
+        sigma = self.sigma
+        if self.lower == None:
+            return norm(loc=mu, scale=sigma).pdf(vector)
+        else:
+            mu = self.mu
+            sigma = self.sigma
+            lower = self._lower
+            upper = self._upper
+            a = (lower - mu) / sigma
+            b = (upper - mu) / sigma
+            
+            return truncnorm(a, b, loc=mu, scale=sigma).pdf(vector)
 
+    def get_max_density(self) -> float:
+        if self.lower is None:
+            return self._pdf(np.array([self.mu]))[0]
+
+        if self.mu < self._lower:
+            return self._pdf(np.array([self._lower]))[0]
+        elif self.mu > self._upper:
+            return self._pdf(np.array([self._upper]))[0]
+        else:
+            return self._pdf(np.array([self.mu]))[0]
+
+
+cdef class BetaFloatHyperparameter(UniformFloatHyperparameter):
+    cdef public alpha
+    cdef public beta
+
+    def __init__(self, name: str, alpha: Union[int, float], beta: Union[int, float],
+                 lower: Union[float, int],
+                 upper: Union[float, int],
+                 default_value: Union[None, float] = None,
+                 q: Union[int, float, None] = None, log: bool = False,
+                 meta: Optional[Dict] = None) -> None:
+        r"""
+        A beta distributed float hyperparameter. The 'lower' and 'upper' parameters move the
+        distribution from the [0, 1]-range and scale it appropriately, but the shape of the
+        distribution is preserved as if it were in [0, 1]-range.
+
+        Its values are sampled from a beta distribution
+        :math:`Beta(\alpha, \beta)`.
+
+        Example
+        -------
+
+        >>> import ConfigSpace as CS
+        >>> import ConfigSpace.hyperparameters as CSH
+        >>> cs = CS.ConfigurationSpace(seed=1)
+        >>> beta_float_hp = CSH.BetaFloatHyperparameter('beta_float', alpha=3,
+        ...                                             beta=2, lower=1, upper=4, log=False)
+        >>> cs.add_hyperparameter(beta_float_hp)
+        beta_float, Type: BetaFloat, Alpha: 3.0 Beta: 2.0, Range: [1.0, 4.0], Default: 3.0
+
+        Parameters
+        ----------
+        name : str
+            Name of the hyperparameter, with which it can be accessed
+        alpha : int, float
+            Alpha parameter of the normalized beta distribution
+        beta : int, float
+            Beta parameter of the normalized beta distribution
+        lower : int, float
+            Lower bound of a range of values from which the hyperparameter will be sampled.
+            The Beta disribution gets scaled by the total range of the hyperparameter.
+        upper : int, float
+            Upper bound of a range of values from which the hyperparameter will be sampled.
+            The Beta disribution gets scaled by the total range of the hyperparameter.
+        default_value : int, float, optional
+            Sets the default value of a hyperparameter to a given value
+        q : int, float, optional
+            Quantization factor
+        log : bool, optional
+            If ``True``, the values of the hyperparameter will be sampled
+            on a logarithmic scale. Default to ``False``
+        meta : Dict, optional
+            Field for holding meta data provided by the user.
+            Not used by the configuration space.
+        """
+        # TODO - we cannot use the check_default of UniformFloat (but everything else),
+        # but we still need to overwrite it. Thus, we first just need it not to raise an
+        # error, which we do by setting default_value = upper - lower / 2 to not raise an error,
+        # then actually call check_default once we have alpha and beta, and are not inside 
+        # UniformFloatHP.
+        super(BetaFloatHyperparameter, self).__init__(
+            name, lower, upper, (upper + lower) / 2, q, log, meta)
+        self.alpha = float(alpha)
+        self.beta = float(beta)
+        if (alpha < 1) or (beta < 1):
+            raise ValueError("Please provide values of alpha and beta larger than or equal to\
+             1 so that the probability density is finite.")
+             
+        if (self.q is not None) and (self.log is not None) and (default_value is None):        
+            warnings.warn('Logscale and quantization together results in incorrect default values. '
+                          'We recommend specifying a default value manually for this specific case.')
+        
+        self.default_value = self.check_default(default_value)
+        self.normalized_default_value = self._inverse_transform(self.default_value)
+        
+    def __repr__(self) -> str:
+        repr_str = io.StringIO()
+        repr_str.write("%s, Type: BetaFloat, Alpha: %s Beta: %s, Range: [%s, %s], Default: %s" % (self.name, repr(self.alpha), repr(self.beta), repr(self.lower), repr(self.upper), repr(self.default_value)))
+
+        if self.log:
+            repr_str.write(", on log-scale")
+        if self.q is not None:
+            repr_str.write(", Q: %s" % str(self.q))
+        repr_str.seek(0)
+        return repr_str.getvalue()
+
+    def __eq__(self, other: Any) -> bool:
+        """
+        This method implements a comparison between self and another
+        object.
+
+        Additionally, it defines the __ne__() as stated in the
+        documentation from python:
+            By default, object implements __eq__() by using is, returning NotImplemented
+            in the case of a false comparison: True if x is y else NotImplemented.
+            For __ne__(), by default it delegates to __eq__() and inverts the result
+            unless it is NotImplemented.
+
+        """
+        if not isinstance(other, self.__class__):
+            return False
+
+        return (
+            self.name == other.name and
+            self.default_value == other.default_value and
+            self.alpha == other.alpha and
+            self.beta == other.beta and
+            self.log == other.log and
+            self.q == other.q and
+            self.lower == other.lower and
+            self.upper == other.upper
+        )
+
+    def __copy__(self):
+        return BetaFloatHyperparameter(
+            name=self.name,
+            default_value=self.default_value,
+            alpha=self.alpha,
+            beta=self.beta,
+            log=self.log,
+            q=self.q,
+            lower=self.lower,
+            upper=self.upper,
+            meta=self.meta
+        )
+
+    def __hash__(self):
+        return hash((self.name, self.alpha, self.beta, self.lower, self.upper, self.log, self.q))
+
+    def to_uniform(self) -> 'UniformFloatHyperparameter':
+        return UniformFloatHyperparameter(self.name,
+                                          self.lower,
+                                          self.upper,
+                                          default_value=self.default_value,
+                                          q=self.q, log=self.log, meta=self.meta)
+
+    def check_default(self, default_value: Union[int, float, None]) -> Union[int, float]:
+        # return mode as default
+        # TODO - for log AND quantization together specifially, this does not give the exact right
+        # value, due to the bounds _lower and _upper being adjusted when quantizing in 
+        # UniformFloat.
+        if default_value is None:
+            if (self.alpha > 1) or (self.beta > 1):
+                normalized_mode = (self.alpha - 1) / (self.alpha + self.beta - 2)
+            else: 
+                # If both alpha and beta are 1, we have a uniform distribution.
+                normalized_mode = 0.5
+            
+            ub = self._inverse_transform(self.upper)
+            lb = self._inverse_transform(self.lower)
+            scaled_mode = normalized_mode * (ub - lb) + lb
+            return self._transform_scalar(scaled_mode)
+        
+        elif self.is_legal(default_value):
+            return default_value
+        else:
+            raise ValueError("Illegal default value %s" % str(default_value))
+
+    def to_integer(self) -> 'BetaIntegerHyperparameter':
+        if self.q is None:
+            q_int = None
+        else:
+            q_int = int(np.rint(self.q))
+        
+        lower = int(np.ceil(self.lower))
+        upper = int(np.floor(self.upper))
+        default_value = int(np.rint(self.default_value))
+        return BetaIntegerHyperparameter(self.name, lower=lower, upper=upper, alpha=self.alpha, beta=self.beta,
+                                           default_value=int(np.rint(self.default_value)),
+                                           q=q_int, log=self.log)
+
+    def is_legal(self, value: Union[float]) -> bool:
+        if isinstance(value, (float, int)):
+            return self.upper >= value >= self.lower
+        return False
+
+
+    cpdef bint is_legal_vector(self, DTYPE_t value):
+        return self._upper >= value >= self._lower
+
+    def _sample(self, rs: np.random.RandomState, size: Optional[int] = None
+                ) -> Union[np.ndarray, float]:
+        alpha = self.alpha
+        beta = self.beta
+        return spbeta(alpha, beta).rvs(size=size, random_state=rs)
+
+    def _pdf(self, vector: np.ndarray) -> np.ndarray:
+        """
+        Computes the probability density function of the parameter in 
+        the transformed (and possibly normalized, depends on the parameter 
+        type) space. As such, one never has to worry about log-normal 
+        distributions, only normal distributions (as the inverse_transform
+        in the pdf method handles these).
+        
+        Parameters
+        ----------
+        vector: np.ndarray
+            the (N, ) vector of inputs for which the probability density
+            function is to be computed.
+        
+        Returns
+        ----------
+        np.ndarray(N, )
+            Probability density values of the input vector
+        """
+        ub = self._inverse_transform(self.upper)
+        lb = self._inverse_transform(self.lower)
+        alpha = self.alpha
+        beta = self.beta
+        return spbeta(alpha, beta, loc=lb, scale=ub-lb).pdf(vector) \
+        * (ub-lb) / (self._upper - self._lower)
+
+    def get_max_density(self) -> float:
+        if (self.alpha > 1) or (self.beta > 1):
+            normalized_mode = (self.alpha - 1) / (self.alpha + self.beta - 2)
+        elif self.alpha < self.beta:
+            normalized_mode = 0
+        elif self.alpha > self.beta:
+            normalized_mode = 1
+        else: 
+            normalized_mode = 0.5
+
+        ub = self._inverse_transform(self.upper)
+        lb = self._inverse_transform(self.lower)
+        scaled_mode = normalized_mode * (ub - lb) + lb
+
+        # Since _pdf takes only a numpy array, we have to create the array, 
+        # and retrieve the element in the first (and only) spot in the array
+        return self._pdf(np.array([scaled_mode]))[0]
+        
 cdef class UniformIntegerHyperparameter(IntegerHyperparameter):
     def __init__(self, name: str, lower: int, upper: int, default_value: Union[int, None] = None,
                  q: Union[int, None] = None, log: bool = False,
                  meta: Optional[Dict] = None) -> None:
         """
-        An integer hyperparameter.
+        A uniformly distributed integer hyperparameter.
 
         Its values are sampled from a uniform distribution
         with bounds ``lower`` and ``upper``.
@@ -957,6 +1475,7 @@ cdef class UniformIntegerHyperparameter(IntegerHyperparameter):
                                                self.upper + 0.49999,
                                                log=self.log,
                                                default_value=self.default_value)
+
         self.normalized_default_value = self._inverse_transform(self.default_value)
 
     def __repr__(self) -> str:
@@ -1127,6 +1646,34 @@ cdef class UniformIntegerHyperparameter(IntegerHyperparameter):
 
         return neighbors
 
+    def _pdf(self, vector: np.ndarray) -> np.ndarray:
+        """
+        Computes the probability density function of the parameter in 
+        the transformed (and possibly normalized, depends on the parameter 
+        type) space. As such, one never has to worry about log-normal 
+        distributions, only normal distributions (as the inverse_transform
+        in the pdf method handles these). Optimally, an IntegerHyperparameter
+        should have a corresponding float, which can be utlized for the calls
+        to the probability density function (see e.g. NormalIntegerHyperparameter)
+        
+        Parameters
+        ----------
+        vector: np.ndarray
+            the (N, ) vector of inputs for which the probability density
+            function is to be computed.
+        
+        Returns
+        ----------
+        np.ndarray(N, )
+            Probability density values of the input vector
+        """
+        return self.ufhp._pdf(vector)
+
+    def get_max_density(self) -> float:
+        lb = self.lower
+        ub = self.upper
+        return 1 / (ub - lb + 1)
+
     def get_size(self) -> float:
         if self.q is None:
             q = 1
@@ -1138,7 +1685,8 @@ cdef class UniformIntegerHyperparameter(IntegerHyperparameter):
 cdef class NormalIntegerHyperparameter(IntegerHyperparameter):
     cdef public mu
     cdef public sigma
-    cdef nfhp
+    cdef public nfhp
+    cdef normalization_constant
 
 
     def __init__(self, name: str, mu: int, sigma: Union[int, float],
@@ -1148,7 +1696,7 @@ cdef class NormalIntegerHyperparameter(IntegerHyperparameter):
                  upper: Optional[int] = None,
                  meta: Optional[Dict] = None) -> None:
         r"""
-        An integer hyperparameter.
+        A normally distributed integer hyperparameter.
 
         Its values are sampled from a normal distribution
         :math:`\mathcal{N}(\mu, \sigma^2)`.
@@ -1156,13 +1704,13 @@ cdef class NormalIntegerHyperparameter(IntegerHyperparameter):
         Example
         -------
 
-            >>> import ConfigSpace as CS
-            >>> import ConfigSpace.hyperparameters as CSH
-            >>> cs = CS.ConfigurationSpace(seed=1)
-            >>> normal_int_hp = CSH.NormalIntegerHyperparameter(name='normal_int', mu=0,
-            ...                                                 sigma=1, log=False)
-            >>> cs.add_hyperparameter(normal_int_hp)
-            normal_int, Type: NormalInteger, Mu: 0 Sigma: 1, Default: 0
+        >>> import ConfigSpace as CS
+        >>> import ConfigSpace.hyperparameters as CSH
+        >>> cs = CS.ConfigurationSpace(seed=1)
+        >>> normal_int_hp = CSH.NormalIntegerHyperparameter(name='normal_int', mu=0,
+        ...                                                 sigma=1, log=False)
+        >>> cs.add_hyperparameter(normal_int_hp)
+        normal_int, Type: NormalInteger, Mu: 0 Sigma: 1, Default: 0
 
         Parameters
         ----------
@@ -1209,8 +1757,6 @@ cdef class NormalIntegerHyperparameter(IntegerHyperparameter):
             self.q = None
         self.log = bool(log)
 
-        self.default_value = self.check_default(default_value)
-
         if (lower is not None) ^ (upper is not None):
             raise ValueError("Only one bound was provided when both lower and upper bounds must be provided.")
 
@@ -1228,7 +1774,6 @@ cdef class NormalIntegerHyperparameter(IntegerHyperparameter):
             self.lower = lower
             self.upper = upper
 
-
         self.nfhp = NormalFloatHyperparameter(self.name,
                                               self.mu,
                                               self.sigma,
@@ -1236,9 +1781,16 @@ cdef class NormalIntegerHyperparameter(IntegerHyperparameter):
                                               q=self.q,
                                               lower=self.lower,
                                               upper=self.upper,
-                                              default_value=self.default_value)
+                                              default_value=default_value)
 
+        self.default_value = self.check_default(default_value)
         self.normalized_default_value = self._inverse_transform(self.default_value)
+        
+        if (self.lower is None) or (self.upper is None):
+            # Since a bound is missing, the pdf cannot be normalized. Working with the unnormalized variant)
+            self.normalization_constant = 1
+        else:
+            self.normalization_constant = self._compute_normalization()
 
     def __repr__(self) -> str:
         repr_str = io.StringIO()
@@ -1278,7 +1830,8 @@ cdef class NormalIntegerHyperparameter(IntegerHyperparameter):
             self.log == other.log and
             self.q == other.q and
             self.lower == other.lower and
-            self.upper == other.upper
+            self.upper == other.upper and
+            self.default_value == other.default_value
         )
 
     def __hash__(self):
@@ -1297,7 +1850,6 @@ cdef class NormalIntegerHyperparameter(IntegerHyperparameter):
             meta=self.meta
         )
 
-    # todo check if conversion should be done in initiation call or inside class itsel
     def to_uniform(self, z: int = 3) -> 'UniformIntegerHyperparameter':
         if self.lower is None or self.upper is None:
             lb = np.round(int(self.mu - (z * self.sigma)))
@@ -1310,7 +1862,7 @@ cdef class NormalIntegerHyperparameter(IntegerHyperparameter):
                                             lb,
                                             ub,
                                             default_value=self.default_value,
-                                            q=self.q, log=self.log)
+                                            q=self.q, log=self.log, meta=self.meta)
 
     def is_legal(self, value: int) -> bool:
         return isinstance(value, (int, np.int32, np.int64))
@@ -1320,7 +1872,10 @@ cdef class NormalIntegerHyperparameter(IntegerHyperparameter):
 
     def check_default(self, default_value: int) -> int:
         if default_value is None:
-            return self.mu
+            if self.log:
+                return self._transform_scalar(self.mu)
+            else:
+                return self.mu
 
         elif self.is_legal(default_value):
             return default_value
@@ -1383,6 +1938,45 @@ cdef class NormalIntegerHyperparameter(IntegerHyperparameter):
             else:
                 neighbors.append(new_value)
         return neighbors
+        
+    def _compute_normalization(self):
+        if self.lower is None:
+            warnings.warn('Cannot normalize the pdf exactly for a NormalIntegerHyperparameter'
+            f' {self.name} without bounds. Skipping normalization for that hyperparameter.')
+            return 1
+
+        else:
+            all_integer_values = np.arange(self.lower, self.upper + 1)
+            all_probabilities = self.nfhp.pdf(all_integer_values)
+            return np.sum(all_probabilities)
+
+    def _pdf(self, vector: np.ndarray) -> np.ndarray:
+        """
+        Computes the probability density function of the parameter in 
+        the transformed (and possibly normalized, depends on the parameter 
+        type) space. As such, one never has to worry about log-normal 
+        distributions, only normal distributions (as the inverse_transform
+        in the pdf method handles these). Optimally, an IntegerHyperparameter
+        should have a corresponding float, which can be utlized for the calls
+        to the probability density function (see e.g. NormalIntegerHyperparameter)
+        
+        Parameters
+        ----------
+        vector: np.ndarray
+            the (N, ) vector of inputs for which the probability density
+            function is to be computed.
+        
+        Returns
+        ----------
+        np.ndarray(N, )
+            Probability density values of the input vector
+        """
+        return self.nfhp._pdf(vector) / self.normalization_constant
+
+    def get_max_density(self):
+        all_integer_values = np.arange(self.lower, self.upper + 1)
+        all_probabilities = self.nfhp.pdf(all_integer_values)
+        return np.max(all_probabilities) / self.normalization_constant
 
     def get_size(self) -> float:
         if self.lower is None:
@@ -1395,13 +1989,215 @@ cdef class NormalIntegerHyperparameter(IntegerHyperparameter):
             return np.rint((self.upper - self.lower) / self.q) + 1
 
 
+cdef class BetaIntegerHyperparameter(UniformIntegerHyperparameter):
+    cdef public alpha
+    cdef public beta
+    cdef public bfhp
+    cdef normalization_constant
+
+
+    def __init__(self, name: str, alpha: Union[int, float], beta: Union[int, float],
+                 lower: Union[int, float],
+                 upper: Union[int, float],
+                 default_value: Union[int, None] = None, q: Union[None, int] = None,
+                 log: bool = False,
+                 meta: Optional[Dict] = None) -> None:
+        r"""
+        A beta distributed integer hyperparameter. The 'lower' and 'upper' parameters move the
+        distribution from the [0, 1]-range and scale it appropriately, but the shape of the
+        distribution is preserved as if it were in [0, 1]-range.
+
+        Its values are sampled from a beta distribution
+        :math:`Beta(\alpha, \beta)`.
+
+        Example
+        -------
+
+        >>> import ConfigSpace as CS
+        >>> import ConfigSpace.hyperparameters as CSH
+        >>> cs = CS.ConfigurationSpace(seed=1)
+        >>> beta_int_hp = CSH.BetaIntegerHyperparameter('beta_int', alpha=3,
+        ...                                             beta=2, lower=1, upper=4, log=False)
+        >>> cs.add_hyperparameter(beta_int_hp)
+        beta_int, Type: BetaInteger, Alpha: 3.0 Beta: 2.0, Range: [1, 4], Default: 3
+
+
+        Parameters
+        ----------
+        name : str
+            Name of the hyperparameter with which it can be accessed
+        alpha : int, float
+            Alpha parameter of the distribution, from which hyperparameter is sampled
+        beta : int, float
+            Beta parameter of the distribution, from which
+            hyperparameter is sampled
+        lower : int, float
+            Lower bound of a range of values from which the hyperparameter will be sampled
+        upper : int, float
+            Upper bound of a range of values from which the hyperparameter will be sampled
+        default_value : int, optional
+            Sets the default value of a hyperparameter to a given value
+        q : int, optional
+            Quantization factor
+        log : bool, optional
+            If ``True``, the values of the hyperparameter will be sampled
+            on a logarithmic scale. Defaults to ``False``
+        meta : Dict, optional
+            Field for holding meta data provided by the user.
+            Not used by the configuration space.
+
+        """
+        super(BetaIntegerHyperparameter, self).__init__(
+            name, lower, upper, round((upper + lower) / 2), q, log, meta)
+        self.alpha = float(alpha)
+        self.beta = float(beta)
+        if (alpha < 1) or (beta < 1):
+            raise ValueError("Please provide values of alpha and beta larger than or equal to\
+             1 so that the probability density is finite.")
+        if self.q is None:
+            q = 1
+        else:
+            q = self.q
+        self.bfhp = BetaFloatHyperparameter(self.name,
+                                              self.alpha,
+                                              self.beta,
+                                              log=self.log,
+                                              q=q,
+                                              lower=self.lower,
+                                              upper=self.upper,
+                                              default_value=self.default_value)
+
+        self.default_value = self.check_default(default_value)
+        self.normalized_default_value = self._inverse_transform(self.default_value)
+        self.normalization_constant = self._compute_normalization()
+
+    def __repr__(self) -> str:
+        repr_str = io.StringIO()
+        repr_str.write("%s, Type: BetaInteger, Alpha: %s Beta: %s, Range: [%s, %s], Default: %s" % (self.name, repr(self.alpha), repr(self.beta), repr(self.lower), repr(self.upper), repr(self.default_value)))
+        
+        if self.log:
+            repr_str.write(", on log-scale")
+        if self.q is not None:
+            repr_str.write(", Q: %s" % str(self.q))
+        repr_str.seek(0)
+        return repr_str.getvalue()
+
+    def __eq__(self, other: Any) -> bool:
+        """
+        This method implements a comparison between self and another
+        object.
+
+        Additionally, it defines the __ne__() as stated in the
+        documentation from python:
+            By default, object implements __eq__() by using is, returning NotImplemented
+            in the case of a false comparison: True if x is y else NotImplemented.
+            For __ne__(), by default it delegates to __eq__() and inverts the result
+            unless it is NotImplemented.
+
+        """
+        if not isinstance(other, self.__class__):
+            return False
+
+        return (
+            self.name == other.name and
+            self.alpha == other.alpha and
+            self.beta == other.beta and
+            self.log == other.log and
+            self.q == other.q and
+            self.lower == other.lower and
+            self.upper == other.upper
+        )
+
+    def __hash__(self):
+        return hash((self.name, self.alpha, self.beta, self.lower, self.upper, self.log, self.q))
+
+    def __copy__(self):
+        return BetaIntegerHyperparameter(
+            name=self.name,
+            default_value=self.default_value,
+            alpha=self.alpha,
+            beta=self.beta,
+            log=self.log,
+            q=self.q,
+            lower=self.lower,
+            upper=self.upper,
+            meta=self.meta
+        )
+
+    def to_uniform(self) -> 'UniformIntegerHyperparameter':
+        return UniformIntegerHyperparameter(self.name,
+                                            self.lower,
+                                            self.upper,
+                                            default_value=self.default_value,
+                                            q=self.q, log=self.log, meta=self.meta)
+
+
+    def check_default(self, default_value: Union[int, float, None]) -> int:
+        if default_value is None:
+            # Here, we just let the BetaFloat take care of the default value
+            # computation, and just tansform it accordingly
+            value = self.bfhp.check_default(None)   
+            value = self._inverse_transform(value)
+            value = self._transform(value)
+            return value
+        
+        if self.is_legal(default_value):
+            return default_value
+        else:
+            raise ValueError('Illegal default value {}'.format(default_value))
+          
+    def _sample(self, rs: np.random.RandomState, size: Optional[int] = None
+                ) -> Union[np.ndarray, float]:
+        value = self.bfhp._sample(rs, size=size)
+        # Map all floats which belong to the same integer value to the same
+        # float value by first transforming it to an integer and then
+        # transforming it back to a float between zero and one
+        value = self._transform(value)
+        value = self._inverse_transform(value)
+        return value
+
+    def _compute_normalization(self):
+        all_integer_values = np.arange(self.lower, self.upper + 1)
+        all_probabilities = self.bfhp.pdf(all_integer_values)
+        return np.sum(all_probabilities)
+
+    def _pdf(self, vector: np.ndarray) -> np.ndarray:
+        """
+        Computes the probability density function of the parameter in 
+        the transformed (and possibly normalized, depends on the parameter 
+        type) space. As such, one never has to worry about log-normal 
+        distributions, only normal distributions (as the inverse_transform
+        in the pdf method handles these). Optimally, an IntegerHyperparameter
+        should have a corresponding float, which can be utlized for the calls
+        to the probability density function (see e.g. NormalIntegerHyperparameter)
+        
+        Parameters
+        ----------
+        vector: np.ndarray
+            the (N, ) vector of inputs for which the probability density
+            function is to be computed.
+        
+        Returns
+        ----------
+        np.ndarray(N, )
+            Probability density values of the input vector
+        """
+        return self.bfhp._pdf(vector) / self.normalization_constant
+
+    def get_max_density(self):
+        all_integer_values = np.arange(self.lower, self.upper + 1)
+        all_probabilities = self.bfhp.pdf(all_integer_values)
+        return np.max(all_probabilities) / self.normalization_constant
+
+
 cdef class CategoricalHyperparameter(Hyperparameter):
     cdef public tuple choices
-    cdef public tuple probabilities
+    cdef public tuple weights
     cdef public int num_choices
+    cdef public tuple probabilities
     cdef list choices_vector
     cdef set _choices_set
-
+    
     # TODO add more magic for automated type recognition
     # TODO move from list to tuple for choices argument
     def __init__(
@@ -1466,6 +2262,8 @@ cdef class CategoricalHyperparameter(Hyperparameter):
             raise TypeError('Using a set of weights is prohibited as it can result in '
                             'non-deterministic behavior. Please use a list or a tuple.')
         self.choices = tuple(choices)
+        if weights is not None:
+            self.weights = tuple(weights)
         self.probabilities = self._get_probabilities(choices=self.choices, weights=weights)
         self.num_choices = len(choices)
         self.choices_vector = list(range(self.num_choices))
@@ -1483,7 +2281,8 @@ cdef class CategoricalHyperparameter(Hyperparameter):
         repr_str.write("}")
         repr_str.write(", Default: ")
         repr_str.write(str(self.default_value))
-        if self.probabilities is not None:
+        # if the probability distribution is not uniform, write out the probabilities
+        if not np.all(self.probabilities == self.probabilities[0]):
             repr_str.write(", Probabilities: %s" % str(self.probabilities))
         repr_str.seek(0)
         return repr_str.getvalue()
@@ -1504,9 +2303,40 @@ cdef class CategoricalHyperparameter(Hyperparameter):
         if not isinstance(other, self.__class__):
             return False
 
+        if self.probabilities is not None:
+            ordered_probabilities_self = {
+                choice: self.probabilities[i] for i, choice in enumerate(self.choices)
+            }
+        else:
+            ordered_probabilities_self = None
+        if other.probabilities is not None:
+            ordered_probabilities_other = {
+                choice: (
+                    other.probabilities[other.choices.index(choice)]
+                    if choice in other.choices else
+                    None
+                )
+                for choice in self.choices
+            }
+        else:
+            ordered_probabilities_other = None
+
         return (
             self.name == other.name and
-            set(self.choices) == set(other.choices)
+            set(self.choices) == set(other.choices) and
+            self.default_value == other.default_value and
+            (
+                (ordered_probabilities_self is None and ordered_probabilities_other is None) or
+                ordered_probabilities_self == ordered_probabilities_other or
+                (
+                    ordered_probabilities_self is None
+                    and len(np.unique(list(ordered_probabilities_other.values()))) == 1
+                ) or
+                (
+                    ordered_probabilities_other is None
+                    and len(np.unique(list(ordered_probabilities_self.values()))) == 1
+                )
+             )
         )
 
     def __hash__(self):
@@ -1517,7 +2347,25 @@ cdef class CategoricalHyperparameter(Hyperparameter):
             name=self.name,
             choices=copy.deepcopy(self.choices),
             default_value=self.default_value,
-            weights=copy.deepcopy(self.probabilities),
+            weights=copy.deepcopy(self.weights),
+            meta=self.meta
+        )
+
+    def to_uniform(self) -> 'CategoricalHyperparameter':
+        """
+        Creates a categorical parameter with equal weights for all choices
+        This is used for the uniform configspace when sampling configurations in the local search
+        in PiBO: https://openreview.net/forum?id=MMAeCXIa89
+        
+        Returns
+        ----------
+        CategoricalHyperparameter
+            An identical parameter as the original, except that all weights are uniform.
+        """
+        return CategoricalHyperparameter(
+            name=self.name,
+            choices=copy.deepcopy(self.choices),
+            default_value=self.default_value,
             meta=self.meta
         )
 
@@ -1545,7 +2393,7 @@ cdef class CategoricalHyperparameter(Hyperparameter):
     def _get_probabilities(self, choices: Tuple[Union[None, str, float, int]],
                            weights: Union[None, List[float]]) -> Union[None, List[float]]:
         if weights is None:
-            return weights
+            return tuple(np.ones(len(choices)) / len(choices))
 
         if len(weights) != len(choices):
             raise ValueError(
@@ -1604,7 +2452,7 @@ cdef class CategoricalHyperparameter(Hyperparameter):
             return self._transform_scalar(vector)
         except ValueError:
             return None
-
+    
     def _inverse_transform(self, vector: Union[None, str, float, int]) -> Union[int, float]:
         if vector is None:
             return np.NaN
@@ -1658,6 +2506,63 @@ cdef class CategoricalHyperparameter(Hyperparameter):
                          "NumericalHyperparameter or "
                          "OrdinalHyperparameter, but is "
                          "<cdef class 'ConfigSpace.hyperparameters.CategoricalHyperparameter'>")
+
+    def pdf(self, vector: np.ndarray) -> np.ndarray:
+        """
+        Computes the probability density function of the parameter in 
+        the original parameter space (the one specified by the user).
+        For each parameter type, there is also a method _pdf which 
+        operates on the transformed (and possibly normalized) parameter
+        space. Only legal values return a positive probability density,
+        otherwise zero.
+        
+        Parameters
+        ----------
+        vector: np.ndarray
+            the (N, ) vector of inputs for which the probability density
+            function is to be computed.
+        
+        Returns
+        ----------
+        np.ndarray(N, )
+            Probability density values of the input vector
+        """
+        # this check is to ensure shape is right (and np.shape does not work in cython)
+        if vector.ndim != 1:
+            raise ValueError("Method pdf expects a one-dimensional numpy array")
+        vector = np.array(self._inverse_transform(vector))
+        return self._pdf(vector)
+        
+    def _pdf(self, vector: np.ndarray) -> np.ndarray:
+        """
+        Computes the probability density function of the parameter in 
+        the transformed (and possibly normalized, depends on the parameter 
+        type) space. As such, one never has to worry about log-normal 
+        distributions, only normal distributions (as the inverse_transform
+        in the pdf method handles these). For categoricals, each vector gets 
+        transformed to its corresponding index (but in float form). To be 
+        able to retrieve the element corresponding to the index, the float 
+        must be cast to int. 
+        
+        Parameters
+        ----------
+        vector: np.ndarray
+            the (N, ) vector of inputs for which the probability density
+            function is to be computed.
+        
+        Returns
+        ----------
+        np.ndarray(N, )
+            Probability density values of the input vector
+        """
+        probs = np.array(self.probabilities)
+        res = np.array(probs[vector.astype(int)])
+        if res.ndim == 0:
+            return res.reshape(-1)
+        return res
+
+    def get_max_density(self) -> float:
+        return np.max(self.probabilities)
 
     def get_size(self) -> float:
         return len(self.choices)
@@ -1765,7 +2670,8 @@ cdef class OrdinalHyperparameter(Hyperparameter):
 
         return (
             self.name == other.name and
-            self.sequence == other.sequence
+            self.sequence == other.sequence and
+            self.default_value == other.default_value
         )
 
     def __copy__(self):
@@ -1947,6 +2853,58 @@ cdef class OrdinalHyperparameter(Hyperparameter):
 
     def allow_greater_less_comparison(self) -> bool:
         return True
+
+    def pdf(self, vector: np.ndarray) -> np.ndarray:
+        """
+        Computes the probability density function of the hyperparameter in 
+        the original hyperparameter space (the one specified by the user).
+        For each parameter type, there is also a method _pdf which 
+        operates on the transformed (and possibly normalized) hyperparameter
+        space. Only legal values return a positive probability density,
+        otherwise zero. The OrdinalHyperparameter is treated
+        as a UniformHyperparameter with regard to its probability density.
+        
+        Parameters
+        ----------
+        vector: np.ndarray
+            the (N, ) vector of inputs for which the probability density
+            function is to be computed.
+        
+        Returns
+        ----------
+        np.ndarray(N, )
+            Probability density values of the input vector
+        """
+        if vector.ndim != 1:
+            raise ValueError("Method pdf expects a one-dimensional numpy array")
+        return self._pdf(vector)
+        
+    def _pdf(self, vector: np.ndarray) -> np.ndarray:
+        """
+        Computes the probability density function of the hyperparameter in 
+        the transformed (and possibly normalized, depends on the hyperparameter 
+        type) space. As such, one never has to worry about log-normal 
+        distributions, only normal distributions (as the inverse_transform
+        in the pdf method handles these). The OrdinalHyperparameter is treated
+        as a UniformHyperparameter with regard to its probability density.
+        
+        Parameters
+        ----------
+        vector: np.ndarray
+            the (N, ) vector of inputs for which the probability density
+            function is to be computed.
+        
+        Returns
+        ----------
+        np.ndarray(N, )
+            Probability density values of the input vector
+        """
+        if not np.all(np.isin(vector, self.sequence)):
+            raise ValueError(f'Some element in the vector {vector} is not in the sequence {self.sequence}.')
+        return np.ones_like(vector, dtype=np.float64) / self.num_elements
+
+    def get_max_density(self) -> float:
+        return 1 / self.num_elements
 
     def get_size(self) -> float:
         return len(self.sequence)

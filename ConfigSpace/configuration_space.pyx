@@ -41,6 +41,9 @@ from ConfigSpace.hyperparameters import (
     Hyperparameter,
     Constant,
     FloatHyperparameter,
+    UniformFloatHyperparameter,
+    UniformIntegerHyperparameter,
+    OrdinalHyperparameter
 )
 from ConfigSpace.conditions import (
     ConditionComponent,
@@ -52,6 +55,7 @@ from ConfigSpace.forbidden import (
     AbstractForbiddenComponent,
     AbstractForbiddenClause,
     AbstractForbiddenConjunction,
+    ForbiddenRelation,
 )
 from typing import (
     Union, List, Any, Dict, Iterable, Set, Tuple, Optional, KeysView
@@ -588,25 +592,35 @@ class ConfigurationSpace(collections.abc.Mapping):
                             "with an instance of "
                             "ConfigSpace.forbidden.AbstractForbiddenComponent.")
         to_check = list()
+        relation_to_check = list()
         if isinstance(clause, AbstractForbiddenClause):
             to_check.append(clause)
         elif isinstance(clause, AbstractForbiddenConjunction):
             to_check.extend(clause.get_descendant_literal_clauses())
+        elif isinstance(clause, ForbiddenRelation):
+            relation_to_check.extend(clause.get_descendant_literal_clauses())
         else:
             raise NotImplementedError(type(clause))
 
-        for tmp_clause in to_check:
-            if tmp_clause.hyperparameter.name not in self._hyperparameters:
+        def _check_hp(tmp_clause, hp):
+            if hp.name not in self._hyperparameters:
                 raise ValueError(
                     "Cannot add clause '%s' because it references hyperparameter"
                     " %s which is not in the configuration space (allowed "
                     "hyperparameters are: %s)"
                     % (
                         tmp_clause,
-                        tmp_clause.hyperparameter.name,
+                        hp.name,
                         list(self._hyperparameters),
                     )
                 )
+
+        for tmp_clause in to_check:
+            _check_hp(tmp_clause, tmp_clause.hyperparameter)
+
+        for tmp_clause in relation_to_check:
+            _check_hp(tmp_clause, tmp_clause.left)
+            _check_hp(tmp_clause, tmp_clause.right)
 
     def add_configuration_space(self,
                                 prefix: str,
@@ -675,20 +689,27 @@ class ConfigurationSpace(collections.abc.Mapping):
             conditions_to_add.append(new_condition)
         self.add_conditions(conditions_to_add)
 
+        def prefix_hp_name(hyperparameter: Hyperparameter):
+            if hyperparameter.name == prefix or \
+                    hyperparameter.name == '':
+                hyperparameter.name = prefix
+            elif not hyperparameter.name.startswith(
+                    "%s%s" % (prefix, delimiter)):
+                hyperparameter.name = "%s%s%s" % \
+                                          (prefix, delimiter,
+                                           hyperparameter.name)
+
         forbiddens_to_add = []
         for forbidden_clause in configuration_space.forbidden_clauses:
             # new_forbidden = copy.deepcopy(forbidden_clause)
             new_forbidden = forbidden_clause
             dlcs = new_forbidden.get_descendant_literal_clauses()
             for dlc in dlcs:
-                if dlc.hyperparameter.name == prefix or \
-                                dlc.hyperparameter.name == '':
-                    dlc.hyperparameter.name = prefix
-                elif not dlc.hyperparameter.name.startswith(
-                                "%s%s" % (prefix, delimiter)):
-                    dlc.hyperparameter.name = "%s%s%s" % \
-                                              (prefix, delimiter,
-                                               dlc.hyperparameter.name)
+                if isinstance(dlc, ForbiddenRelation):
+                    prefix_hp_name(dlc.left)
+                    prefix_hp_name(dlc.right)
+                else:
+                    prefix_hp_name(dlc.hyperparameter)
             forbiddens_to_add.append(new_forbidden)
         self.add_forbidden_clauses(forbiddens_to_add)
 
@@ -1275,7 +1296,12 @@ class ConfigurationSpace(collections.abc.Mapping):
         for clause in self.get_forbiddens():
             based_on_conditionals = False
             for subclause in clause.get_descendant_literal_clauses():
-                if subclause.hyperparameter.name not in unconditional_hyperparameters:
+                if isinstance(subclause, ForbiddenRelation):
+                    if subclause.left.name not in unconditional_hyperparameters or \
+                            subclause.right.name not in unconditional_hyperparameters:
+                        based_on_conditionals = True
+                        break
+                elif subclause.hyperparameter.name not in unconditional_hyperparameters:
                     based_on_conditionals = True
                     break
             if based_on_conditionals:
@@ -1341,6 +1367,31 @@ class ConfigurationSpace(collections.abc.Mapping):
         """
         self.random = np.random.RandomState(seed)
 
+    def remove_hyperparameter_priors(self) -> 'ConfigurationSpace':
+        """
+        Produces a new ConfigurationSpace where all priors on parameters are removed.
+        Non-uniform hyperpararmeters are replaced with uniform ones, and 
+        CategoricalHyperparameters with weights have their weights removed. 
+        
+        Returns
+        -------
+        :class:`~ConfigSpace.configuration_space.ConfigurationSpace`
+            The resulting configuration space, without priors on the hyperparameters
+        """
+        uniform_config_space = ConfigurationSpace()
+        for parameter in self.get_hyperparameters():
+            if hasattr(parameter, 'to_uniform'):
+                uniform_config_space.add_hyperparameter(parameter.to_uniform())
+            else:
+                uniform_config_space.add_hyperparameter(copy.copy(parameter))
+        
+        new_conditions = self.substitute_hyperparameters_in_conditions(self.get_conditions(), uniform_config_space)
+        new_forbiddens = self.substitute_hyperparameters_in_forbiddens(self.get_forbiddens(), uniform_config_space)
+        uniform_config_space.add_conditions(new_conditions)
+        uniform_config_space.add_forbidden_clauses(new_forbiddens)
+        
+        return uniform_config_space
+
     def estimate_size(self) -> Union[float, int]:
         """
         Estimate the size of the current configuration space (i.e. unique configurations).
@@ -1366,6 +1417,102 @@ class ConfigurationSpace(collections.abc.Mapping):
             for i in range(1, len(sizes)):
                 size = size * sizes[i]
             return size
+
+    @staticmethod
+    def substitute_hyperparameters_in_conditions(conditions, new_configspace) -> List['ConditionComponent']:
+        """
+        Takes a set of conditions and generates a new set of conditions with the same structure, where 
+        each hyperparameter is replaced with its namesake in new_configspace. As such, the set of conditions
+        remain unchanged, but the included hyperparameters are changed to match those types that exist in
+        new_configspace.
+
+        Parameters
+        ----------
+        new_configspace: ConfigurationSpace 
+            A ConfigurationSpace containing hyperparameters with the same names as those in the conditions.
+
+        Returns
+        -------
+        List[ConditionComponent]: 
+            The list of conditions, adjusted to fit the new ConfigurationSpace
+        """    
+        new_conditions = []
+        for condition in conditions:
+            if isinstance(condition, AbstractConjunction):
+                conjunction_type = type(condition)
+                children = condition.get_descendant_literal_conditions()
+                substituted_children = ConfigurationSpace.substitute_hyperparameters_in_conditions(children, new_configspace)
+                substituted_conjunction = conjunction_type(*substituted_children)
+                new_conditions.append(substituted_conjunction)
+            
+            elif isinstance(condition, AbstractCondition):
+                condition_type = type(condition)
+                child_name = getattr(condition.get_children()[0], 'name')
+                parent_name = getattr(condition.get_parents()[0], 'name')
+                new_child = new_configspace[child_name]
+                new_parent = new_configspace[parent_name]
+                
+                if hasattr(condition, 'value'):
+                    condition_arg = getattr(condition, 'value')
+                    substituted_condition = condition_type(child=new_child, parent=new_parent, value=condition_arg)
+                elif hasattr(condition, 'values'):
+                    condition_arg = getattr(condition, 'values')
+                    substituted_condition = condition_type(child=new_child, parent=new_parent, values=condition_arg)
+                else:
+                    raise AttributeError(f'Did not find the expected attribute in condition {type(condition)}.')
+                
+                new_conditions.append(substituted_condition)
+            else:
+                raise TypeError(f'Did not expect the supplied condition type {type(condition)}.')
+                
+        return new_conditions
+
+    @staticmethod
+    def substitute_hyperparameters_in_forbiddens(forbiddens, new_configspace) -> List['ConditionComponent']:
+        """
+        Takes a set of forbidden clauses and generates a new set of forbidden clauses with the same structure, 
+        where each hyperparameter is replaced with its namesake in new_configspace. As such, the set of forbidden 
+        clauses remain unchanged, but the included hyperparameters are changed to match those types that exist in
+        new_configspace.
+
+        Parameters
+        ----------
+        new_configspace: ConfigurationSpace 
+            A ConfigurationSpace containing hyperparameters with the same names as those in the forbidden clauses.
+
+        Returns
+        -------
+        List[AbstractForbiddenComponent]: 
+            The list of forbidden clauses, adjusted to fit the new ConfigurationSpace
+        """    
+        new_forbiddens = []
+        for forbidden in forbiddens:
+            if isinstance(forbidden, AbstractForbiddenConjunction):
+                conjunction_type = type(forbidden)
+                children = forbidden.get_descendant_literal_clauses()
+                substituted_children = ConfigurationSpace.substitute_hyperparameters_in_forbiddens(children, new_configspace)
+                substituted_conjunction = conjunction_type(*substituted_children)
+                new_forbiddens.append(substituted_conjunction)
+            
+            elif isinstance(forbidden, AbstractForbiddenClause):
+                forbidden_type = type(forbidden)
+                hyperparameter_name = getattr(forbidden.hyperparameter, 'name')
+                new_hyperparameter = new_configspace[hyperparameter_name]
+                
+                if hasattr(forbidden, 'value'):
+                    forbidden_arg = getattr(forbidden, 'value')
+                    substituted_forbidden = forbidden_type(hyperparameter=new_hyperparameter, value=forbidden_arg)
+                elif hasattr(forbidden, 'values'):
+                    forbidden_arg = getattr(forbidden, 'values')
+                    substituted_forbidden = forbidden_type(hyperparameter=new_hyperparameter, values=forbidden_arg)
+                else:
+                    raise AttributeError(f'Did not find the expected attribute in forbidden {type(forbidden)}.')
+                
+                new_forbiddens.append(substituted_forbidden)
+            else:
+                raise TypeError(f'Did not expect the supplied forbidden type {type(forbidden)}.')
+        
+        return new_forbiddens
 
 
 class Configuration(collections.abc.Mapping):

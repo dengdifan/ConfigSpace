@@ -16,6 +16,8 @@ from ConfigSpace.hyperparameters import (
     OrdinalHyperparameter,
     Constant,
     UnParametrizedHyperparameter,
+    BetaFloatHyperparameter,
+    BetaIntegerHyperparameter
 )
 from ConfigSpace.conditions import (
     AbstractCondition,
@@ -32,10 +34,14 @@ from ConfigSpace.forbidden import (
     ForbiddenAndConjunction,
     ForbiddenInClause,
     AbstractForbiddenComponent,
+    ForbiddenRelation,
+    ForbiddenLessThanRelation,
+    ForbiddenEqualsRelation,
+    ForbiddenGreaterThanRelation,
 )
 
 
-JSON_FORMAT_VERSION = 0.2
+JSON_FORMAT_VERSION = 0.4
 
 
 ################################################################################
@@ -78,6 +84,17 @@ def _build_normal_float(param: NormalFloatHyperparameter) -> Dict:
     }
 
 
+def _build_beta_float(param: BetaFloatHyperparameter) -> Dict:
+    return {
+        'name': param.name,
+        'type': 'beta_float',
+        'log': param.log,
+        'alpha': param.alpha,
+        'beta': param.beta,
+        'default': param.default_value
+    }
+
+
 def _build_uniform_int(param: UniformIntegerHyperparameter) -> Dict:
     return {
         'name': param.name,
@@ -100,13 +117,24 @@ def _build_normal_int(param: NormalIntegerHyperparameter) -> Dict:
     }
 
 
+def _build_beta_int(param: BetaIntegerHyperparameter) -> Dict:
+    return {
+        'name': param.name,
+        'type': 'beta_int',
+        'log': param.log,
+        'alpha': param.alpha,
+        'beta': param.beta,
+        'default': param.default_value
+    }
+
+
 def _build_categorical(param: CategoricalHyperparameter) -> Dict:
     return {
         'name': param.name,
         'type': 'categorical',
         'choices': param.choices,
         'default': param.default_value,
-        'probabilities': param.probabilities,
+        'weights': param.weights,
     }
 
 
@@ -233,6 +261,8 @@ def _build_forbidden(clause) -> Dict:
         return _build_forbidden_in_clause(clause)
     elif isinstance(clause, ForbiddenAndConjunction):
         return _build_forbidden_and_conjunction(clause)
+    elif isinstance(clause, ForbiddenRelation):
+        return _build_forbidden_relation(clause)
     else:
         raise TypeError(clause)
 
@@ -264,6 +294,24 @@ def _build_forbidden_and_conjunction(clause: ForbiddenAndConjunction) -> Dict:
     }
 
 
+def _build_forbidden_relation(clause: ForbiddenRelation) -> Dict:
+    if isinstance(clause, ForbiddenLessThanRelation):
+        lambda_ = 'LESS'
+    elif isinstance(clause, ForbiddenEqualsRelation):
+        lambda_ = 'EQUALS'
+    elif isinstance(clause, ForbiddenGreaterThanRelation):
+        lambda_ = 'GREATER'
+    else:
+        raise ValueError("Unknown relation '%s'" % type(clause))
+
+    return {
+        'left': clause.left.name,
+        'right': clause.right.name,
+        'type': 'RELATION',
+        'lambda': lambda_
+    }
+
+
 ################################################################################
 def write(configuration_space, indent=2):
     """
@@ -271,20 +319,18 @@ def write(configuration_space, indent=2):
     :class:`~ConfigSpace.configuration_space.ConfigurationSpace` in json format.
     This string can be written to file.
 
-    Example
-    -------
-    .. doctest::
+    Example:
 
-        >>> from ConfigSpace import ConfigurationSpace
-        >>> import ConfigSpace.hyperparameters as CSH
-        >>> from ConfigSpace.read_and_write import json
-        >>> cs = ConfigurationSpace()
-        >>> cs.add_hyperparameter(CSH.CategoricalHyperparameter('a', choices=[1, 2, 3]))
-        a, Type: Categorical, Choices: {1, 2, 3}, Default: 1
+    ..code:: python
 
-        >>> with open('configspace.json', 'w') as f:
-        ...      f.write(json.write(cs))
-        305
+        from ConfigSpace import ConfigurationSpace
+        import ConfigSpace.hyperparameters as CSH
+        from ConfigSpace.read_and_write import json
+        cs = ConfigurationSpace()
+        cs.add_hyperparameter(CSH.CategoricalHyperparameter('a', choices=[1, 2, 3]))
+
+        with open('configspace.json', 'w') as f:
+            f.write(json.write(cs))
 
     Parameters
     ----------
@@ -320,10 +366,14 @@ def write(configuration_space, indent=2):
             hyperparameters.append(_build_uniform_float(hyperparameter))
         elif isinstance(hyperparameter, NormalFloatHyperparameter):
             hyperparameters.append(_build_normal_float(hyperparameter))
+        elif isinstance(hyperparameter, BetaFloatHyperparameter):
+            hyperparameters.append(_build_beta_float(hyperparameter))
         elif isinstance(hyperparameter, UniformIntegerHyperparameter):
             hyperparameters.append(_build_uniform_int(hyperparameter))
         elif isinstance(hyperparameter, NormalIntegerHyperparameter):
             hyperparameters.append(_build_normal_int(hyperparameter))
+        elif isinstance(hyperparameter, BetaIntegerHyperparameter):
+            hyperparameters.append(_build_beta_int(hyperparameter))
         elif isinstance(hyperparameter, CategoricalHyperparameter):
             hyperparameters.append(_build_categorical(hyperparameter))
         elif isinstance(hyperparameter, OrdinalHyperparameter):
@@ -462,7 +512,7 @@ def _construct_hyperparameter(hyperparameter: Dict) -> Hyperparameter:
             name=name,
             choices=hyperparameter['choices'],
             default_value=hyperparameter['default'],
-            weights=hyperparameter.get('probabilities'),
+            weights=hyperparameter.get('weights'),
         )
     elif hp_type == 'ordinal':
         return OrdinalHyperparameter(
@@ -581,6 +631,8 @@ def _construct_forbidden(
         return _construct_forbidden_in(clause, cs)
     elif forbidden_type == 'AND':
         return _construct_forbidden_and(clause, cs)
+    elif forbidden_type == 'RELATION':
+        return _construct_forbidden_equals(clause, cs)
     else:
         return ValueError(forbidden_type)
 
@@ -611,3 +663,20 @@ def _construct_forbidden_and(
 ) -> ForbiddenAndConjunction:
     clauses = [_construct_forbidden(cl, cs) for cl in clause['clauses']]
     return ForbiddenAndConjunction(*clauses)
+
+
+def _construct_forbidden_relation(
+        clause: Dict,
+        cs: ConfigurationSpace,
+) -> ForbiddenRelation:
+    left = cs.get_hyperparameter(clause['left'])
+    right = cs.get_hyperparameter(clause['right'])
+
+    if clause['lambda'] == "LESS":
+        return ForbiddenLessThanRelation(left, right)
+    elif clause['lambda'] == "EQUALS":
+        return ForbiddenEqualsRelation(left, right)
+    elif clause['lambda'] == "GREATER":
+        return ForbiddenGreaterThanRelation(left, right)
+    else:
+        raise ValueError("Unknown relation '%s'" % clause['lambda'])

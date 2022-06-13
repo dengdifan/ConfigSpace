@@ -1,5 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+"""
+The old PCS format is part of the `Algorithm Configuration Library <http://aclib.net/#>`_.
+
+A detailed explanation of the **old** PCS format can be found
+`here. <http://aclib.net/cssc2014/pcs-format.pdf>`_
+"""
 
 __authors__ = ["Katharina Eggensperger", "Matthias Feurer"]
 __contact__ = "automl.org"
@@ -66,9 +72,9 @@ pp_forbidden_clause = "{" + pp_param_name + "=" + pp_numberorname + \
 
 
 def build_categorical(param):
-    if param.probabilities is not None:
+    if param.weights is not None:
         raise ValueError('The pcs format does not support categorical hyperparameters with '
-                         'assigend weights/probabilities (for hyperparameter %s)' % param.name)
+                         'assigned weights (for hyperparameter %s)' % param.name)
     cat_template = "%s {%s} [%s]"
     return cat_template % (param.name,
                            ", ".join([str(value) for value in param.choices]),
